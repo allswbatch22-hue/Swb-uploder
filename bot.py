@@ -2,19 +2,20 @@ import os
 import time
 import requests
 import subprocess
+import threading
+from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Render Variables se details lena
+# Render Variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Channels save karne ke liye list
 CHANNELS = {}
-index_data = [] # Indexing ke liye message IDs save karega
+index_data = []
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -37,10 +38,8 @@ async def handle_txt_file(client, message):
     if not CHANNELS:
         return await message.reply_text("❌ Pehle /add_channel command se koi channel add karein.")
 
-    # File download karna
     file_path = await message.download()
     
-    # Channel select karne ke liye buttons banana
     buttons = []
     for name, ch_id in CHANNELS.items():
         buttons.append([InlineKeyboardButton(name, callback_data=f"upload_{ch_id}_{file_path}")])
@@ -62,51 +61,44 @@ async def process_file(client, callback_query):
         lines = f.readlines()
 
     global index_data
-    index_data = [] # Reset index for new course
+    index_data = []
 
     for line in lines:
         line = line.strip()
         if not line: continue
         
-        # Line ko Name aur Link me todna (Peeche se pehla space)
         try:
             name, link = line.rsplit(" ", 1)
         except:
-            continue # Agar format galat hai toh skip karein
+            continue
 
         success = False
-        # Retry Loop (3 baar try karega)
         for attempt in range(3):
             try:
                 msg = await callback_query.message.reply_text(f"📥 Downloading: {name}\nAttempt: {attempt + 1}/3")
                 
                 if link.endswith(".pdf"):
-                    # PDF Download logic
                     pdf_path = f"{name}.pdf".replace("/", "_")
                     response = requests.get(link)
                     with open(pdf_path, "wb") as pdf_file:
                         pdf_file.write(response.content)
                     
-                    # Telegram par bhejna
                     sent_msg = await client.send_document(target_channel, document=pdf_path, caption=name)
-                    os.remove(pdf_path) # Server space bachane ke liye delete
+                    os.remove(pdf_path)
                     
-                else: # m3u8 ya mp4 link
+                else:
                     video_path = f"{name}.mp4".replace("/", "_")
-                    # yt-dlp se download (FFmpeg ki madad se)
                     command = f'yt-dlp -o "{video_path}" "{link}"'
                     subprocess.run(command, shell=True, check=True)
                     
-                    # Telegram par bhejna
                     sent_msg = await client.send_video(target_channel, video=video_path, caption=name)
                     os.remove(video_path)
 
-                # Index ke liye save karna
                 index_data.append({"name": name, "msg_id": sent_msg.id, "channel": target_channel})
-                await msg.delete() # Progress message delete karein
+                await msg.delete()
                 success = True
-                time.sleep(5) # Anti-Spam delay
-                break # Agar success ho gaya toh loop tod do
+                time.sleep(5)
+                break
                 
             except Exception as e:
                 await msg.edit_text(f"❌ Error in {name}: {e}\nRetrying...")
@@ -115,11 +107,8 @@ async def process_file(client, callback_query):
         if not success:
             await client.send_message(callback_query.message.chat.id, f"⚠️ FAILED (3 tries): {name}\nLink: {link}")
 
-    # Pura course hone ke baad Index Generate karna
     if index_data:
         index_text = "📚 **Course Index**\n\n"
-        # channel_username nikalna padega ya direct link banani padegi
-        # Telegram private channel links: https://t.me/c/1234567890/msg_id
         chan_id_str = str(target_channel).replace("-100", "") 
         for item in index_data:
             index_text += f"▪️ [{item['name']}](https://t.me/c/{chan_id_str}/{item['msg_id']})\n"
@@ -127,4 +116,19 @@ async def process_file(client, callback_query):
         await client.send_message(target_channel, index_text, disable_web_page_preview=True)
         await callback_query.message.reply_text("✅ Course successfully upload ho gaya aur Index ban gaya!")
 
-app.run()
+# --- DUMMY WEB SERVER CODE ---
+web_server = Flask(__name__)
+
+@web_server.route('/')
+def home():
+    return "Bot is Alive and Running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    web_server.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    # Web server ko alag thread me chalana
+    threading.Thread(target=run_web, daemon=True).start()
+    # Bot ko chalana
+    app.run()
