@@ -3,3 +3,5 @@ tgcrypto
 yt-dlp
 requests
 flask
+static-ffmpeg
+
