@@ -1,0 +1,130 @@
+import os
+import time
+import requests
+import subprocess
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# Render Variables se details lena
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Channels save karne ke liye list
+CHANNELS = {}
+index_data = [] # Indexing ke liye message IDs save karega
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply_text("Hello! Main ek Course Uploader Bot hoon.\n\n1. Pehle /add_channel <Channel_ID> <Name> karke channel add karein.\n2. Phir mujhe apni .txt file bhejein.")
+
+@app.on_message(filters.command("add_channel"))
+async def add_channel(client, message):
+    try:
+        _, ch_id, ch_name = message.text.split(" ", 2)
+        CHANNELS[ch_name] = int(ch_id)
+        await message.reply_text(f"✅ Channel '{ch_name}' add ho gaya!")
+    except:
+        await message.reply_text("❌ Galat format. Aise likhein:\n`/add_channel -1001234567890 MyChannel`")
+
+@app.on_message(filters.document & filters.private)
+async def handle_txt_file(client, message):
+    if not message.document.file_name.endswith(".txt"):
+        return await message.reply_text("Kripya sirf .txt file bhejein.")
+    
+    if not CHANNELS:
+        return await message.reply_text("❌ Pehle /add_channel command se koi channel add karein.")
+
+    # File download karna
+    file_path = await message.download()
+    
+    # Channel select karne ke liye buttons banana
+    buttons = []
+    for name, ch_id in CHANNELS.items():
+        buttons.append([InlineKeyboardButton(name, callback_data=f"upload_{ch_id}_{file_path}")])
+    
+    await message.reply_text(
+        "Aap is file ka course kis channel me upload karna chahte hain?",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query(filters.regex(r"^upload_"))
+async def process_file(client, callback_query):
+    data = callback_query.data.split("_", 2)
+    target_channel = int(data[1])
+    file_path = data[2]
+    
+    await callback_query.message.edit_text("⏳ Uploading shuru ho rahi hai... Kripya wait karein.")
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    global index_data
+    index_data = [] # Reset index for new course
+
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        # Line ko Name aur Link me todna (Peeche se pehla space)
+        try:
+            name, link = line.rsplit(" ", 1)
+        except:
+            continue # Agar format galat hai toh skip karein
+
+        success = False
+        # Retry Loop (3 baar try karega)
+        for attempt in range(3):
+            try:
+                msg = await callback_query.message.reply_text(f"📥 Downloading: {name}\nAttempt: {attempt + 1}/3")
+                
+                if link.endswith(".pdf"):
+                    # PDF Download logic
+                    pdf_path = f"{name}.pdf".replace("/", "_")
+                    response = requests.get(link)
+                    with open(pdf_path, "wb") as pdf_file:
+                        pdf_file.write(response.content)
+                    
+                    # Telegram par bhejna
+                    sent_msg = await client.send_document(target_channel, document=pdf_path, caption=name)
+                    os.remove(pdf_path) # Server space bachane ke liye delete
+                    
+                else: # m3u8 ya mp4 link
+                    video_path = f"{name}.mp4".replace("/", "_")
+                    # yt-dlp se download (FFmpeg ki madad se)
+                    command = f'yt-dlp -o "{video_path}" "{link}"'
+                    subprocess.run(command, shell=True, check=True)
+                    
+                    # Telegram par bhejna
+                    sent_msg = await client.send_video(target_channel, video=video_path, caption=name)
+                    os.remove(video_path)
+
+                # Index ke liye save karna
+                index_data.append({"name": name, "msg_id": sent_msg.id, "channel": target_channel})
+                await msg.delete() # Progress message delete karein
+                success = True
+                time.sleep(5) # Anti-Spam delay
+                break # Agar success ho gaya toh loop tod do
+                
+            except Exception as e:
+                await msg.edit_text(f"❌ Error in {name}: {e}\nRetrying...")
+                time.sleep(3)
+                
+        if not success:
+            await client.send_message(callback_query.message.chat.id, f"⚠️ FAILED (3 tries): {name}\nLink: {link}")
+
+    # Pura course hone ke baad Index Generate karna
+    if index_data:
+        index_text = "📚 **Course Index**\n\n"
+        # channel_username nikalna padega ya direct link banani padegi
+        # Telegram private channel links: https://t.me/c/1234567890/msg_id
+        chan_id_str = str(target_channel).replace("-100", "") 
+        for item in index_data:
+            index_text += f"▪️ [{item['name']}](https://t.me/c/{chan_id_str}/{item['msg_id']})\n"
+        
+        await client.send_message(target_channel, index_text, disable_web_page_preview=True)
+        await callback_query.message.reply_text("✅ Course successfully upload ho gaya aur Index ban gaya!")
+
+app.run()
